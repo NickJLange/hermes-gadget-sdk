@@ -87,6 +87,16 @@ STATUS_POLL_S = 0.5           # how often live device state is compared with sta
 # device is unpaired; if approval races it, it is a cheap read-only command.
 PAIRING_TRIGGER = "/status"
 HOST_ONLY_TEXT = "Can't show all of it here. Approve or deny it on the host."
+# hermes_dot patch: speak messages that arrive outside a turn (send_message, cron).
+_CRON_WRAP = re.compile(r"^Cronjob Response: .*?\n-------------\n\n(.*?)(?:\n\nTo stop or manage this job.*)?$", re.S)
+
+
+def _spoken_text(content: str) -> str:
+    """The words to speak for a proactive message: no cron header/footer, no Markdown."""
+    m = _CRON_WRAP.match(content or "")
+    return textfmt.strip_markdown(m.group(1) if m else (content or "")).strip()
+
+
 _PAIRING_CMD = re.compile(r"(hermes\s+(?:-p\s+\S+\s+)?pairing\s+approve\s+\S+\s+([A-Z2-9]{8}))\b")
 # The gateway echoes speech-to-text results with this translated line: a microphone emoji and the
 # quoted transcript, quoted per language (Ukrainian uses «»). Patterns are built from the line itself.
@@ -1146,7 +1156,19 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
         if text:
             interim = bool((metadata or {}).get("_interim_send"))
             await session.send_reply(text, turn=self._turns.get(session.device_id), interim=interim)
+        # hermes_dot patch: Hermes only speaks replies to voice turns, so a message pushed with
+        # send_message or cron would stay silent on a speaker-only device. Speak it here, one at a
+        # time (a new audio stream replaces the one playing).
+        if (self._turns.get(session.device_id) is None and not (metadata or {}).get("_interim_send")
+                and session.has_speaker and self._should_auto_tts_for_chat(chat_id)
+                and (spoken := _spoken_text(content))):
+            session.spawn(self._speak_in_order(chat_id, spoken))
         return SendResult(success=True, message_id=uuid.uuid4().hex[:12])
+
+    async def _speak_in_order(self, chat_id: str, text: str) -> None:
+        lock = self.__dict__.setdefault("_proactive_speech_lock", asyncio.Lock())
+        async with lock:
+            await self._speak(chat_id, text)
 
     def supports_draft_streaming(self, chat_type=None, metadata=None, chat_id=None) -> bool:
         return True

@@ -51,6 +51,23 @@ DISPLAY_SCHEMA = {
     },
 }
 
+SPEAK_SCHEMA = {
+    "name": "gadget_speak",
+    "description": "Say something out loud right now on a gadget with a speaker (for example the Office Echo), "
+                   "using Hermes's text-to-speech. Use this to talk to someone through a gadget from any chat; "
+                   "it plays within a few seconds, so do not schedule a cron job for it. Plain spoken sentences, "
+                   "no Markdown. Messages play one at a time.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "What to say."},
+            "device": _DEVICE_PARAM,
+        },
+        "required": ["text"],
+    },
+}
+
+
 ACTION_SCHEMA = {
     "name": "gadget_action",
     "description": "Invoke an action a gadget exposes (for example an LED, relay, buzzer, volume control or camera capture). "
@@ -190,6 +207,32 @@ def gadget_action(args: dict, **_kw) -> str:
     return json.dumps({"success": True, "device": session.name, "action": action, "result": result})
 
 
+def gadget_speak(args: dict, **_kw) -> str:
+    # hermes_dot patch: immediate speech from any chat, instead of cron delivery.
+    adapter = _adapter()
+    if adapter is None:
+        return _error("gadget hub is not running in this process")
+    session, err = _resolve(adapter, args.get("device"))
+    if err:
+        return _error(err)
+    if (err := _usable(session)):
+        return _error(err)
+    if not session.has_speaker:
+        return _error(f"{session.name} has no speaker")
+    text = textfmt.strip_markdown(str(args.get("text") or "")).strip()
+    if not text:
+        return _error("text is required")
+
+    async def start():
+        session.spawn(adapter._speak_in_order(session.device_id, text))
+
+    try:
+        _run(adapter, start())
+    except Exception as exc:
+        return _error(f"could not reach {session.name}: {exc}")
+    return json.dumps({"success": True, "device": session.name, "status": "speaking now"})
+
+
 def available() -> bool:
     """Reachability: tools work only in the process hosting the gadget hub."""
     return runtime.any_active()
@@ -200,6 +243,7 @@ def register_tools(ctx) -> None:
         (DEVICES_SCHEMA, gadget_devices, "📟"),
         (DISPLAY_SCHEMA, gadget_display, "🖥️"),
         (ACTION_SCHEMA, gadget_action, "🎛️"),
+        (SPEAK_SCHEMA, gadget_speak, "🔊"),
     ):
         ctx.register_tool(
             name=schema["name"], toolset=TOOLSET, schema=schema, handler=handler,
