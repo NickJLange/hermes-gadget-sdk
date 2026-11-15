@@ -375,6 +375,10 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
     def loop(self) -> Optional[asyncio.AbstractEventLoop]:
         return self._loop
 
+    def in_turn(self, device_id: str) -> bool:
+        """A conversation with the device is in progress (its reply may still be coming)."""
+        return device_id in self._turns
+
     @staticmethod
     def _device_id(chat_id: str) -> str:
         """The device behind a chat id: itself, or the device part of a virtual ``<device>~<profile>``."""
@@ -1388,11 +1392,13 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             session.spawn(self.speak_queued(chat_id, spoken))
         return SendResult(success=True, message_id=uuid.uuid4().hex[:12])
 
-    async def speak_queued(self, chat_id: str, text: str) -> SendResult:
+    async def speak_queued(self, chat_id: str, text: str,
+                           started: Optional[asyncio.Future] = None) -> SendResult:
         """Speak ``text`` after anything the device is already saying or doing, one message at a time.
 
         Waits (up to SPEECH_QUEUE_WAIT_S) for a turn in progress and for audio already playing, so a
-        message never cuts off a spoken reply or an earlier message."""
+        message never cuts off a spoken reply or an earlier message. ``started``, if given, gets the
+        result as soon as the audio starts or fails, before it finishes playing."""
         device_id = self._device_id(chat_id)
         lock = self._speech_locks.setdefault(device_id, asyncio.Lock())
         async with lock:
@@ -1402,7 +1408,10 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
                 if session is None or (device_id not in self._turns and not session.audio_playing):
                     break
                 await asyncio.sleep(0.2)
-            return await self._speak(chat_id, text, wait=True)
+            result = await self._speak(chat_id, text, wait=True, started=started)
+            if started is not None and not started.done():
+                started.set_result(result)
+            return result
 
     def supports_draft_streaming(self, chat_type=None, metadata=None, chat_id=None) -> bool:
         return True
@@ -1549,7 +1558,8 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             session.spawn(self._speak(chat_id, spoken_question(question, choices)))
         return result
 
-    async def _speak(self, chat_id: str, text: str, *, wait: bool = False) -> SendResult:
+    async def _speak(self, chat_id: str, text: str, *, wait: bool = False,
+                     started: Optional[asyncio.Future] = None) -> SendResult:
         """Speak ``text`` on the device with Hermes's configured text-to-speech.
 
         Long text comes back as several files; each one waits for the one before it to finish, so
@@ -1567,7 +1577,8 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
                 return SendResult(success=False, error=error)
             played = SendResult(success=False, error="nothing to play")
             for i, path in enumerate(paths):
-                played = await self._play_file(chat_id, path, wait=wait or i < len(paths) - 1)
+                played = await self._play_file(chat_id, path, wait=wait or i < len(paths) - 1,
+                                               started=started if i == 0 else None)
                 if not played.success:
                     break
             return played
@@ -1595,7 +1606,8 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             return True
         return super()._should_auto_tts_for_chat(chat_id)
 
-    async def _play_file(self, chat_id: str, path: str, *, wait: bool = False) -> SendResult:
+    async def _play_file(self, chat_id: str, path: str, *, wait: bool = False,
+                         started: Optional[asyncio.Future] = None) -> SendResult:
         session = self._session(chat_id)
         if session is None or not session.paired:
             return SendResult(success=False, error="gadget not connected")
@@ -1607,6 +1619,8 @@ class GadgetAdapter(BasePlatformAdapter, HubDelegate):
             logger.warning("[%s] cannot play %s: %s", self.name, path, exc)
             return SendResult(success=False, error=str(exc))
         out = await session.play_pcm(pcm, session.speaker_rate, turn=self._turns.get(session.device_id))
+        if started is not None and not started.done():
+            started.set_result(SendResult(success=True))
         if wait:
             await out.done.wait()
             if out.aborted:

@@ -1,5 +1,5 @@
-"""Agent tools for gadgets: inspect devices, show content on a screen, invoke
-device-declared actions.
+"""Agent tools for gadgets: inspect devices, show content on a screen, say something
+out loud, invoke device-declared actions.
 
 Schemas are static (prompt caching); what a device can do is discovered at run
 time through ``gadget_devices`` and the per-device context Hermes receives with
@@ -19,6 +19,7 @@ from . import runtime, textfmt
 
 TOOLSET = "gadget"
 CALL_TIMEOUT_S = 20.0
+SPEAK_TIMEOUT_S = 60.0  # text-to-speech and any speech queued ahead must finish before this one starts
 
 _DEVICE_PARAM = {
     "type": "string",
@@ -159,6 +160,58 @@ def gadget_display(args: dict, **_kw) -> str:
     return json.dumps(result)
 
 
+SPEAK_SCHEMA = {
+    "name": "gadget_speak",
+    "description": "Say something out loud now on a gadget with a speaker, using Hermes's text-to-speech, for "
+                   "example to tell someone in another room something from any chat. It starts within seconds, "
+                   "so don't schedule a cron job for it. Messages play one after another, never over each other. "
+                   "Write plain spoken sentences, without Markdown. Not for the gadget you are answering right "
+                   "now: your reply there is already spoken.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "What to say."},
+            "device": _DEVICE_PARAM,
+        },
+        "required": ["text"],
+    },
+}
+
+
+def gadget_speak(args: dict, **_kw) -> str:
+    adapter = _adapter()
+    if adapter is None:
+        return _error("gadget hub is not running in this process")
+    session, err = _resolve(adapter, args.get("device"))
+    if err:
+        return _error(err)
+    if (err := _usable(session)):
+        return _error(err)
+    if not session.has_speaker:
+        return _error(f"{session.name} has no speaker")
+    text = textfmt.strip_markdown(str(args.get("text") or "")).strip()
+    if not text:
+        return _error("text is required")
+    if adapter.in_turn(session.device_id):
+        return _error(f"{session.name} is in a conversation now; its reply is spoken, so answer there instead")
+    loop = adapter.loop
+    if loop is None or loop.is_closed():
+        return _error("gadget hub is not running")
+
+    async def start():
+        started = loop.create_future()
+        session.spawn(adapter.speak_queued(session.device_id, text, started))
+        return await started
+
+    try:
+        result = asyncio.run_coroutine_threadsafe(start(), loop).result(SPEAK_TIMEOUT_S)
+    except Exception as exc:  # a timeout here means speech is still queued behind other audio
+        return _error(f"could not start speaking on {session.name}: {exc or type(exc).__name__}")
+    if not result.success:
+        return _error(f"could not speak on {session.name}: {result.error}")
+    return json.dumps({"success": True, "device": session.name, "status": "speaking"})
+
+
 def gadget_action(args: dict, **_kw) -> str:
     adapter = _adapter()
     if adapter is None:
@@ -201,6 +254,7 @@ def register_tools(ctx) -> None:
         (DEVICES_SCHEMA, gadget_devices, "📟"),
         (DISPLAY_SCHEMA, gadget_display, "🖥️"),
         (ACTION_SCHEMA, gadget_action, "🎛️"),
+        (SPEAK_SCHEMA, gadget_speak, "🔊"),
     ):
         ctx.register_tool(
             name=schema["name"], toolset=TOOLSET, schema=schema, handler=handler,

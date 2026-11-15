@@ -357,6 +357,38 @@ def test_agent_tools_drive_the_device(gadget, make_sim, monkeypatch):
     pool.shutdown()
 
 
+def test_the_speak_tool_reports_what_happened(gadget, make_sim, monkeypatch, tmp_path):
+    import concurrent.futures
+
+    from hermes_gadget_plugin import tools
+
+    said = _fake_tts(monkeypatch, tmp_path)
+    sim = _paired_sim(gadget, make_sim, name="Kitchen")
+    mute = _paired_sim(gadget, make_sim, name="Hall", state="mute", board="sim-240x240-nospeaker")
+    pool = concurrent.futures.ThreadPoolExecutor(1)  # tools run on agent worker threads
+
+    def call(args):
+        fut = pool.submit(tools.gadget_speak, args)
+        assert sim.wait_for(fut.done, timeout=15)
+        return json.loads(fut.result())
+
+    spoke = call({"text": "**Dinner** is ready", "device": "Kitchen"})
+    assert spoke == {"success": True, "device": "Kitchen", "status": "speaking"}
+    assert said == ["Dinner is ready"]
+    assert sim.wait_for(lambda: sim.last_received("audio.end") is not None, timeout=10)
+
+    assert "no speaker" in call({"text": "Hello", "device": "Hall"})["error"]
+    gadget.adapter._turns[sim.status()["device_id"]] = "t1"  # the user is talking through it
+    assert "in a conversation" in call({"text": "Hello", "device": "Kitchen"})["error"]
+    gadget.adapter._turns.clear()
+
+    monkeypatch.undo()
+    _fake_tts(monkeypatch, tmp_path, fail=True)
+    failed = call({"text": "Hello", "device": "Kitchen"})
+    assert not failed["success"] and "no TTS provider" in failed["error"]
+    pool.shutdown()
+
+
 def test_images_are_converted_for_the_screen(gadget, make_sim, tmp_path):
     PIL = pytest.importorskip("PIL.Image")
     sim = _paired_sim(gadget, make_sim)

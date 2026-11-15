@@ -12,7 +12,7 @@ Hermes's gateway runs "platform adapters": Telegram, Slack and about twenty othe
 | `__init__.py` | `register(ctx)`: platform entry, agent tools, `hermes gadget` CLI |
 | `adapter.py` | `GadgetAdapter(BasePlatformAdapter)`: the Hermes-facing side |
 | `hub.py` | WebSocket server, auth, audio, images, actions (no Hermes imports) |
-| `tools.py` | `gadget_devices`, `gadget_display`, `gadget_action` |
+| `tools.py` | `gadget_devices`, `gadget_display`, `gadget_speak`, `gadget_action` |
 | `store.py`, `status.py`, `protocol.py`, `audio.py`, `textfmt.py`, `imaging.py` | Support modules (no Hermes imports) |
 | `dashboard/` | The **Gadgets** tab of the Hermes web dashboard: `manifest.json`, the backend routes in `plugin_api.py`, and the tab's bundle in `dist/`, built from `src/` (see [The Gadgets tab](#the-gadgets-tab-in-the-hermes-dashboard)) |
 | `desktop/plugin.js`, `desk.py` | The **Gadgets** page of the Hermes desktop app, built from `desktop-src/`, and the queue that carries its cards and actions to the gateway (see [The Gadgets page in Hermes Desktop](#the-gadgets-page-in-hermes-desktop)) |
